@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin - ExamBrowser Monitor (Pusher)</title>
+    <title>Admin - ExamBrowser (URL per Semester)</title>
     <script src="https://js.pusher.com/8.4.0/pusher.min.js"></script>
     <style>
         body { font-family: 'Segoe UI', sans-serif; background: #1e1e2f; color: #eee; margin: 0; padding: 20px; }
@@ -12,8 +12,8 @@
         button { background: #2c3e66; border: none; padding: 6px 12px; color: white; border-radius: 6px; cursor: pointer; margin: 2px; }
         .danger { background: #8b3c3c; }
         .export-btn { background: #2c6e2c; }
-        .set-url-btn { background: #2c6e2c; padding: 8px 16px; }
-        input[type="text"] { padding: 8px; border-radius: 6px; border: none; width: 60%; min-width: 250px; }
+        .set-url-btn { background: #2c6e2c; padding: 4px 12px; margin-left: 10px; }
+        input[type="text"] { padding: 8px; border-radius: 6px; border: none; width: 70%; min-width: 250px; }
         table { width: 100%; border-collapse: collapse; }
         th, td { text-align: left; padding: 8px; border-bottom: 1px solid #444; }
         .live-grid { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 20px; }
@@ -24,21 +24,16 @@
         .filter-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 15px; flex-wrap: wrap; }
         .log-controls { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
         pre { background: #0f0f1a; padding: 12px; border-radius: 8px; overflow-x: auto; max-height: 400px; margin: 0; }
-        .current-url { background: #0f0f1a; padding: 8px; border-radius: 6px; margin-top: 10px; word-break: break-all; }
-        .info-text { font-size: 12px; color: #aaa; margin-top: 5px; }
+        .semester-row { display: flex; align-items: center; margin-bottom: 10px; gap: 10px; flex-wrap: wrap; }
+        .semester-label { width: 80px; font-weight: bold; }
     </style>
 </head>
 <body>
-<h1>📊 Admin Panel - ExamBrowser (Pusher)</h1>
+<h1>📊 Admin Panel - ExamBrowser (Per Semester)</h1>
 
 <div class="card">
-    <h2>🔗 Pengaturan URL Google Form Ujian</h2>
-    <div>
-        <input type="text" id="formUrlInput" placeholder="Masukkan URL embed Google Form (contoh: .../viewform?embedded=true)" size="60">
-        <button class="set-url-btn" onclick="setFormUrl()">Set URL Ujian</button>
-    </div>
-    <div class="current-url" id="currentUrlDisplay">URL saat ini: (belum diatur)</div>
-    <div class="info-text">URL harus dalam format embed (mengandung ?embedded=true). Setelah diset, peserta akan langsung menggunakan URL ini.</div>
+    <h2>🔗 URL Google Form per Semester</h2>
+    <div id="urlForms"></div>
 </div>
 
 <div class="card">
@@ -74,16 +69,61 @@
 </div>
 
 <script>
-    // ==================== KONFIGURASI PUSHER ====================
+    // Pusher config
     const PUSHER_APP_KEY = '0b5dee236ba494a907ca';
     const PUSHER_CLUSTER = 'ap1';
     const CHANNEL_NAME = 'exam-live';
     const CLIENT_EVENT = 'client-frame';
 
-    let active = new Map(); // sessionId -> { img, semester, name, card }
+    let active = new Map();
     let currentLogs = [];
 
-    // ==================== PUSHER SUBSCRIBE ====================
+    // Load dan tampilkan form URL per semester
+    async function loadUrlConfigs() {
+        const res = await fetch('/api/all-form-urls');
+        const data = await res.json();
+        const urls = data.urls;
+        const container = document.getElementById('urlForms');
+        container.innerHTML = '';
+        for (let i = 1; i <= 6; i++) {
+            const div = document.createElement('div');
+            div.className = 'semester-row';
+            div.innerHTML = `
+                <span class="semester-label">Semester ${i}:</span>
+                <input type="text" id="url_sem_${i}" value="${escapeHtml(urls[i] || '')}" placeholder="URL Google Form (embed)" size="60">
+                <button class="set-url-btn" onclick="setUrl(${i})">Simpan</button>
+            `;
+            container.appendChild(div);
+        }
+    }
+
+    async function setUrl(semester) {
+        const urlInput = document.getElementById(`url_sem_${semester}`);
+        const url = urlInput.value.trim();
+        if (!url) {
+            alert('URL tidak boleh kosong');
+            return;
+        }
+        if (!url.includes('google.com/forms') && !url.includes('docs.google.com/forms')) {
+            if (!confirm('URL ini bukan tampaknya Google Form. Tetap simpan?')) return;
+        }
+        try {
+            const res = await fetch('/api/set-form-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ semester, url })
+            });
+            if (res.ok) {
+                alert(`URL semester ${semester} berhasil disimpan.`);
+            } else {
+                alert('Gagal menyimpan URL');
+            }
+        } catch(e) { alert('Error: ' + e.message); }
+    }
+
+    function escapeHtml(str) { return str.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'})[m]); }
+
+    // Pusher live
     function initPusher() {
         const pusher = new Pusher(PUSHER_APP_KEY, {
             cluster: PUSHER_CLUSTER,
@@ -95,9 +135,7 @@
             if (active.has(sessionId)) {
                 active.get(sessionId).img.src = frame;
             } else {
-                // Tambahkan peserta baru ke grid (nama sementara)
                 addParticipant({ sessionId, semester: '?', name: sessionId.slice(0,8) }, frame);
-                // Coba ambil data dari API untuk update nama & semester
                 fetch(`/api/sessions?semester=all`).then(res => res.json()).then(sessions => {
                     const found = sessions.find(s => s.sessionId === sessionId);
                     if (found && active.has(sessionId)) {
@@ -142,48 +180,10 @@
         const filterSem = document.getElementById('semesterFilter').value;
         for (let [sid, data] of active.entries()) {
             if (data.card) {
-                if (filterSem === 'all' || data.semester === filterSem) data.card.style.display = '';
+                if (filterSem === 'all' || data.semester == filterSem) data.card.style.display = '';
                 else data.card.style.display = 'none';
             }
         }
-    }
-
-    function escapeHtml(str) { return str.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'})[m]); }
-
-    // ==================== API CALLS ====================
-    async function loadCurrentUrl() {
-        try {
-            const res = await fetch('/api/get-form-url');
-            const data = await res.json();
-            const display = document.getElementById('currentUrlDisplay');
-            if (data.url && data.url.trim() !== '') {
-                display.innerHTML = `URL saat ini: <strong>${escapeHtml(data.url)}</strong>`;
-            } else {
-                display.innerHTML = 'URL saat ini: (belum diatur)';
-            }
-            document.getElementById('formUrlInput').value = data.url || '';
-        } catch(e) { console.error(e); }
-    }
-
-    async function setFormUrl() {
-        const url = document.getElementById('formUrlInput').value.trim();
-        if (!url) { alert('Masukkan URL Google Form'); return; }
-        if (!url.includes('google.com/forms') && !url.includes('docs.google.com/forms')) {
-            if (!confirm('URL ini bukan tampaknya Google Form. Tetap set?')) return;
-        }
-        try {
-            const res = await fetch('/api/set-form-url', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url })
-            });
-            if (res.ok) {
-                alert('URL berhasil diatur. Peserta sekarang dapat mengakses ujian.');
-                loadCurrentUrl();
-            } else {
-                alert('Gagal mengatur URL');
-            }
-        } catch(e) { alert('Error: ' + e.message); }
     }
 
     async function loadSessions() {
@@ -256,12 +256,12 @@
         const printWindow = window.open('', '_blank');
         const selectedText = document.getElementById('logSelect').options[document.getElementById('logSelect').selectedIndex]?.text || 'Log Kecurangan';
         const logHtml = currentLogs.map(l => `<tr><td>${new Date(l.timestamp).toLocaleString()}</td><td>${escapeHtml(l.message)}</td>`).join('');
-        printWindow.document.write(`<!DOCTYPE html><html><head><title>Export Log - ${selectedText}</title><style>body{font-family:Arial;margin:20px;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #999;padding:8px;text-align:left;}th{background:#f2f2f2;}</style></head><body><h1>Log Kecurangan - ${selectedText}</h1><p>Diekspor pada: ${new Date().toLocaleString()}</p><tr><thead><tr><th>Waktu</th><th>Pesan</th></tr></thead><tbody>${logHtml}</tbody></table></body></html>`);
+        printWindow.document.write(`<!DOCTYPE html><html><head><title>Export Log - ${selectedText}</title><style>body{font-family:Arial;margin:20px;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #999;padding:8px;text-align:left;}th{background:#f2f2f2;}</style></head><body><h1>Log Kecurangan - ${selectedText}</h1><p>Diekspor pada: ${new Date().toLocaleString()}</p><table><thead><tr><th>Waktu</th><th>Pesan</th></tr></thead><tbody>${logHtml}</tbody></table></body></html>`);
         printWindow.document.close();
         printWindow.print();
     }
 
-    window.onload = () => { loadSessions(); loadCurrentUrl(); initPusher(); };
+    window.onload = () => { loadSessions(); loadUrlConfigs(); initPusher(); };
     setInterval(loadSessions, 10000);
 </script>
 </body>
