@@ -5,23 +5,15 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
-const http = require('http');
-const socketIo = require('socket.io');
 
 const app = express();
-const server = http.createServer(app);
-const io = socketIo(server, {
-    cors: { origin: "*" },
-    transports: ['websocket', 'polling']
-});
-
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(express.static('public'));
 
-// Konfigurasi file penyimpanan URL
+// Konfigurasi file penyimpanan URL Google Form
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 let currentGoogleFormUrl = '';
 if (fs.existsSync(CONFIG_FILE)) {
@@ -30,7 +22,6 @@ if (fs.existsSync(CONFIG_FILE)) {
         if (config.googleFormUrl) currentGoogleFormUrl = config.googleFormUrl;
     } catch(e) {}
 }
-
 function saveConfig() {
     fs.writeFileSync(CONFIG_FILE, JSON.stringify({ googleFormUrl: currentGoogleFormUrl }, null, 2));
 }
@@ -39,6 +30,7 @@ function saveConfig() {
 const RECORDINGS_DIR = path.join(__dirname, 'recordings');
 if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR);
 
+// Penyimpanan sesi di memori
 const sessions = new Map();
 
 // Multer upload video
@@ -55,17 +47,28 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage, limits: { fileSize: 100 * 1024 * 1024 } });
 
-// ---------- API Peserta ----------
+// Helper ambil IP client
+function getClientIp(req) {
+    return req.headers['cf-connecting-ip'] ||
+           req.headers['x-forwarded-for']?.split(',').shift() ||
+           req.headers['x-real-ip'] ||
+           req.socket.remoteAddress ||
+           'IP tidak terdeteksi';
+}
+
+// ========== API Peserta ==========
 app.post('/api/register', (req, res) => {
     const sessionId = uuidv4();
     const { participantName = 'Anonymous', nim = '', semester = '1' } = req.body;
+    const clientIp = getClientIp(req);
     sessions.set(sessionId, {
         name: participantName,
         nim: nim,
         semester: semester,
         startTime: new Date().toISOString(),
         logs: [],
-        videoPath: null
+        videoPath: null,
+        clientIp: clientIp
     });
     res.json({ sessionId });
 });
@@ -100,7 +103,7 @@ app.post('/api/end-recording/:sessionId', (req, res) => {
     res.json({ success: true });
 });
 
-// ---------- API Admin ----------
+// ========== API Admin ==========
 app.get('/api/get-form-url', (req, res) => {
     res.json({ url: currentGoogleFormUrl });
 });
@@ -121,7 +124,8 @@ app.get('/api/sessions', (req, res) => {
         nim: data.nim,
         semester: data.semester,
         startTime: data.startTime,
-        logsCount: data.logs.length
+        logsCount: data.logs.length,
+        clientIp: data.clientIp
     }));
     if (semester && semester !== 'all') {
         sessionList = sessionList.filter(s => s.semester === semester);
@@ -150,51 +154,7 @@ app.delete('/api/session/:sessionId', (req, res) => {
     }
 });
 
-// ---------- Socket.IO ----------
-io.on('connection', (socket) => {
-    console.log('Client connected:', socket.id);
-
-    socket.on('admin-join', () => {
-        socket.join('admin-room');
-        console.log('Admin joined');
-    });
-
-    socket.on('participant-join', (sessionId) => {
-        socket.join(`participant:${sessionId}`);
-        const session = sessions.get(sessionId);
-        const semester = session ? session.semester : 'unknown';
-        console.log(`Participant ${sessionId} (Semester ${semester}) joined live stream`);
-        const rooms = Array.from(io.sockets.adapter.rooms.keys());
-        const activeParticipants = rooms
-            .filter(r => r.startsWith('participant:'))
-            .map(r => {
-                const sid = r.split(':')[1];
-                const sess = sessions.get(sid);
-                return { sessionId: sid, semester: sess ? sess.semester : 'unknown', name: sess ? sess.name : sid };
-            });
-        io.to('admin-room').emit('active-participants', activeParticipants);
-    });
-
-    socket.on('live-frame', ({ sessionId, frame }) => {
-        io.to('admin-room').emit('live-frame-update', { sessionId, frame });
-    });
-
-    socket.on('disconnect', () => {
-        setTimeout(() => {
-            const rooms = Array.from(io.sockets.adapter.rooms.keys());
-            const activeParticipants = rooms
-                .filter(r => r.startsWith('participant:'))
-                .map(r => {
-                    const sid = r.split(':')[1];
-                    const sess = sessions.get(sid);
-                    return { sessionId: sid, semester: sess ? sess.semester : 'unknown', name: sess ? sess.name : sid };
-                });
-            io.to('admin-room').emit('active-participants', activeParticipants);
-        }, 1000);
-    });
-});
-
-// ---------- Rute HTML ----------
+// Rute untuk akses tanpa .html
 app.get('/exam', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'exam.html'));
 });
@@ -202,6 +162,6 @@ app.get('/admin', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
-server.listen(PORT, () => {
+app.listen(PORT, () => {
     console.log(`ExamBrowser server running at http://localhost:${PORT}`);
 });
