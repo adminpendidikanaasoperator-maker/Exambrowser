@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>ExamBrowser - Ujian Online</title>
-    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://js.pusher.com/8.4.0/pusher.min.js"></script>
     <style>
         * { user-select: none; -webkit-tap-highlight-color: transparent; }
         body { margin: 0; padding: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #1e1e2f; color: white; }
@@ -101,10 +101,19 @@
 <div class="transparent-watermark"></div>
 
 <script>
+    // ==================== KONFIGURASI PUSHER ====================
+    const PUSHER_APP_KEY = '0b5dee236ba494a907ca';
+    const PUSHER_CLUSTER = 'ap1';
+    const CHANNEL_NAME = 'exam-live';
+    const CLIENT_EVENT = 'client-frame';
+
+    // ==================== VARIABEL GLOBAL ====================
     let sessionId = null, participantName = "", participantNIM = "", participantSemester = "1";
     let googleFormUrl = "";
     let mediaRecorder = null, recordingActive = false, examActive = false, examFinished = false;
-    let liveStream = null, snapshotInterval = null, socket = null, iframeUrlCheck = null, fullscreenCheckInterval = null, watermarkInterval = null;
+    let liveStream = null, snapshotInterval = null;
+    let iframeUrlCheck = null, fullscreenCheckInterval = null, watermarkInterval = null;
+    let pusher = null, pusherChannel = null;
 
     const startBtn = document.getElementById('startExamBtn'), finishBtn = document.getElementById('finishExamBtn');
     const statusDiv = document.getElementById('status'), participantNameSpan = document.getElementById('participantName');
@@ -113,6 +122,7 @@
     const dynamicWatermarkDiv = document.getElementById('dynamicWatermark');
     const urlStatusDiv = document.getElementById('urlStatus');
 
+    // ==================== FUNGSI UTILITY ====================
     async function sendLog(message, type = 'cheat') {
         if (!sessionId) return;
         try { await fetch(`/api/log/${sessionId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message, type }) }); } catch(e) {}
@@ -168,6 +178,7 @@
         watermarkInterval = setInterval(updateDynamicWatermark, 1000);
     }
 
+    // Proteksi
     function blockCopyPaste() {
         document.addEventListener('copy', (e) => { e.preventDefault(); sendLog('📋 Mencoba copy'); return false; });
         document.addEventListener('cut', (e) => { e.preventDefault(); sendLog('✂️ Mencoba cut'); return false; });
@@ -175,7 +186,6 @@
         document.addEventListener('selectstart', (e) => { e.preventDefault(); return false; });
         document.addEventListener('dragstart', (e) => { e.preventDefault(); return false; });
     }
-
     function blockScreenshot() {
         window.addEventListener('keydown', (e) => {
             const key = e.key.toLowerCase();
@@ -194,7 +204,6 @@
         });
         window.addEventListener('resize', () => { if (examActive) sendLog('⚠️ Resize terdeteksi (potensi screenshot)'); });
     }
-
     function blockCameraAndScreenCapture() {
         if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
             const original = navigator.mediaDevices.getUserMedia;
@@ -204,12 +213,12 @@
             };
         }
     }
-
     function detectDevTools() { setInterval(() => { const before = Date.now(); debugger; if (Date.now() - before > 100 && examActive) sendLog('🛠️ DevTools terdeteksi!'); }, 3000); }
     function detectFocusLoss() { window.addEventListener('blur', () => { if (examActive) sendLog('🔄 Kehilangan fokus (mungkin buka aplikasi lain)'); }); document.addEventListener('visibilitychange', () => { if (document.hidden && examActive) sendLog('👁️ Tab disembunyikan (pindah tab)'); }); }
     function blockRightClick() { document.addEventListener('contextmenu', (e) => { e.preventDefault(); sendLog('🖱️ Klik kanan'); return false; }); }
     function detectSuspiciousElements() { new MutationObserver((mutations) => { mutations.forEach((m) => { if (m.type === 'childList') { m.addedNodes.forEach((node) => { if (node.nodeType === 1) { let cls = node.className || '', id = node.id || ''; if (cls.includes('screenshot') || id.includes('screenshot') || cls.includes('snip') || cls.includes('capture')) sendLog('⚠️ Elemen mencurigakan (tool screenshot) muncul'); } }); } }); }).observe(document.body, { childList: true, subtree: true }); }
 
+    // ==================== MODAL IDENTITAS ====================
     function showIdentityDialog() {
         return new Promise((resolve) => {
             const modal = document.createElement('div');
@@ -283,11 +292,26 @@
         }
     }
 
-    function initSocket() { socket = io(); socket.on('connect', () => { if (sessionId) socket.emit('participant-join', sessionId); }); }
+    // ==================== PUSHER SETUP ====================
+    function initPusher() {
+        pusher = new Pusher(PUSHER_APP_KEY, {
+            cluster: PUSHER_CLUSTER,
+            forceTLS: true
+        });
+        pusherChannel = pusher.subscribe(CHANNEL_NAME);
+        console.log('Pusher channel subscribed');
+    }
 
+    // ==================== REKAMAN & LIVE CAPTURE ====================
     async function startScreenRecording(stream) {
         mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
-        mediaRecorder.ondataavailable = async (e) => { if (e.data.size) { let fd = new FormData(); fd.append('chunk', e.data); await fetch(`/api/upload-chunk/${sessionId}`, { method: 'POST', body: fd }).catch(()=>{}); } };
+        mediaRecorder.ondataavailable = async (e) => {
+            if (e.data.size) {
+                let fd = new FormData();
+                fd.append('chunk', e.data);
+                await fetch(`/api/upload-chunk/${sessionId}`, { method: 'POST', body: fd }).catch(()=>{});
+            }
+        };
         mediaRecorder.onstop = () => { recordingActive = false; statusDiv.innerText = '✅ Rekaman selesai'; };
         mediaRecorder.start(5000);
         recordingActive = true;
@@ -298,18 +322,27 @@
     function startLiveCapture(stream) {
         liveStream = stream;
         const video = document.createElement('video');
-        video.srcObject = stream; video.play();
-        const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d');
+        video.srcObject = stream;
+        video.play();
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
         snapshotInterval = setInterval(() => {
             if (!examActive) return;
             if (video.videoWidth && video.videoHeight) {
-                canvas.width = 320; canvas.height = (video.videoHeight / video.videoWidth) * 320;
+                canvas.width = 320;
+                canvas.height = (video.videoHeight / video.videoWidth) * 320;
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                socket.emit('live-frame', { sessionId, frame: canvas.toDataURL('image/jpeg', 0.5) });
+                const frameData = canvas.toDataURL('image/jpeg', 0.5);
+                
+                // Kirim frame ke Pusher
+                if (pusherChannel) {
+                    pusherChannel.trigger(CLIENT_EVENT, { sessionId, frame: frameData });
+                }
             }
         }, 1000);
     }
 
+    // ==================== MULAI & SELESAI UJIAN ====================
     async function startExam() {
         if (examActive) return;
         if (!googleFormUrl) {
@@ -322,13 +355,25 @@
         await forceFullscreen();
         startFullscreenMonitor();
         let stream;
-        try { stream = await navigator.mediaDevices.getDisplayMedia({ video: true }); } catch(err) { alert('Izin rekam layar diperlukan!'); examActive = false; iframeOverlay.style.display = 'flex'; return; }
+        try {
+            stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        } catch(err) {
+            alert('Izin rekam layar diperlukan!');
+            examActive = false;
+            iframeOverlay.style.display = 'flex';
+            return;
+        }
         startLiveCapture(stream);
         await startScreenRecording(stream);
-        startBtn.disabled = true; finishBtn.disabled = false;
-        statusDiv.innerText = '📝 Ujian berlangsung + rekaman + live';
+        startBtn.disabled = true;
+        finishBtn.disabled = false;
+        statusDiv.innerText = '📝 Ujian berlangsung + rekaman + live streaming via Pusher';
         sendLog('Ujian dimulai');
-        iframeUrlCheck = setInterval(() => { if (iframe.src.includes('formResponse') || iframe.src.includes('thankyou')) { if (examActive && !examFinished) sendLog('⚠️ Form dikirim sebelum Selesai & Kirim'); } }, 500);
+        iframeUrlCheck = setInterval(() => {
+            if (iframe.src.includes('formResponse') || iframe.src.includes('thankyou')) {
+                if (examActive && !examFinished) sendLog('⚠️ Form dikirim sebelum Selesai & Kirim');
+            }
+        }, 500);
     }
 
     async function finishExam() {
@@ -342,7 +387,6 @@
         if (watermarkInterval) clearInterval(watermarkInterval);
         iframeOverlay.style.display = 'flex';
         iframe.src = 'about:blank';
-        if (socket) socket.disconnect();
         await fetch(`/api/end-recording/${sessionId}`, { method: 'POST' });
         statusDiv.innerText = '✅ Ujian selesai';
         sendLog('Ujian selesai');
@@ -351,9 +395,10 @@
         if (document.fullscreenElement) document.exitFullscreen();
     }
 
+    // ==================== INISIALISASI ====================
     async function init() {
         await initSession();
-        initSocket();
+        initPusher();
         blockCopyPaste();
         blockScreenshot();
         blockCameraAndScreenCapture();
