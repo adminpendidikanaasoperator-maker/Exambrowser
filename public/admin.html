@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - ExamBrowser Monitor</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #1e1e2f; color: #eee; margin: 0; padding: 20px; }
+        h1 { color: #ffaa44; }
+        .card { background: #2a2a3a; border-radius: 12px; padding: 16px; margin-bottom: 20px; }
+        button { background: #2c3e66; border: none; padding: 6px 12px; color: white; border-radius: 6px; cursor: pointer; margin: 2px; }
+        .danger { background: #8b3c3c; }
+        .export-btn { background: #2c6e2c; }
+        .set-url-btn { background: #2c6e2c; padding: 8px 16px; }
+        input[type="text"] { padding: 8px; border-radius: 6px; border: none; width: 60%; min-width: 250px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #444; }
+        .live-grid { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 20px; }
+        .live-card { background: #2a2a3a; border-radius: 12px; padding: 10px; width: 320px; text-align: center; }
+        .live-card img { width: 100%; border-radius: 8px; }
+        .flex { display: flex; gap: 20px; flex-wrap: wrap; }
+        .col { flex: 1; min-width: 300px; }
+        .filter-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 15px; flex-wrap: wrap; }
+        .log-controls { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+        pre { background: #0f0f1a; padding: 12px; border-radius: 8px; overflow-x: auto; max-height: 400px; margin: 0; }
+        .current-url { background: #0f0f1a; padding: 8px; border-radius: 6px; margin-top: 10px; word-break: break-all; }
+        .info-text { font-size: 12px; color: #aaa; margin-top: 5px; }
+    </style>
+</head>
+<body>
+<h1>📊 Admin Panel - ExamBrowser</h1>
+
+<div class="card">
+    <h2>🔗 Pengaturan URL Google Form Ujian</h2>
+    <div>
+        <input type="text" id="formUrlInput" placeholder="Masukkan URL embed Google Form (contoh: .../viewform?embedded=true)" size="60">
+        <button class="set-url-btn" onclick="setFormUrl()">Set URL Ujian</button>
+    </div>
+    <div class="current-url" id="currentUrlDisplay">URL saat ini: (belum diatur)</div>
+    <div class="info-text">URL harus dalam format embed (mengandung ?embedded=true). Setelah diset, peserta akan langsung menggunakan URL ini.</div>
+</div>
+
+<div class="card">
+    <div class="filter-bar">
+        <label>Filter Semester:</label>
+        <select id="semesterFilter">
+            <option value="all">Semua Semester</option>
+            <option value="1">Semester 1</option><option value="2">Semester 2</option>
+            <option value="3">Semester 3</option><option value="4">Semester 4</option>
+            <option value="5">Semester 5</option><option value="6">Semester 6</option>
+        </select>
+        <button onclick="loadSessions()">Terapkan Filter</button>
+        <button onclick="loadSessions()">🔄 Refresh</button>
+    </div>
+    <table id="sessionsTable"><thead><tr><th>Nama</th><th>NIM</th><th>Semester</th><th>Mulai</th><th>Log</th><th>Aksi</th></tr></thead><tbody id="sessionsBody"></tbody></table>
+</div>
+
+<div class="flex">
+    <div class="col card log-viewer">
+        <h2>📜 Log Kecurangan</h2>
+        <div class="log-controls">
+            <select id="logSelect" onchange="loadLogs()"><option>-- Pilih sesi --</option></select>
+            <button class="export-btn" onclick="exportLogToCSV()">📎 Export ke Excel (CSV)</button>
+            <button class="export-btn" onclick="exportLogToPDF()">🖨️ Export ke PDF (Print)</button>
+        </div>
+        <pre id="logDisplay">Pilih sesi untuk melihat log kecurangan...</pre>
+    </div>
+</div>
+
+<div class="card">
+    <h2>🖥️ Live Streaming (Real-time)</h2>
+    <div id="liveGrid" class="live-grid"><p>Belum ada peserta aktif</p></div>
+</div>
+
+<script>
+    let socket = null;
+    let active = new Map();
+    let currentLogs = [];
+
+    async function loadCurrentUrl() {
+        try {
+            const res = await fetch('/api/get-form-url');
+            const data = await res.json();
+            const display = document.getElementById('currentUrlDisplay');
+            if (data.url && data.url.trim() !== '') {
+                display.innerHTML = `URL saat ini: <strong>${escapeHtml(data.url)}</strong>`;
+            } else {
+                display.innerHTML = 'URL saat ini: (belum diatur)';
+            }
+            document.getElementById('formUrlInput').value = data.url || '';
+        } catch(e) { console.error(e); }
+    }
+
+    async function setFormUrl() {
+        const url = document.getElementById('formUrlInput').value.trim();
+        if (!url) { alert('Masukkan URL Google Form'); return; }
+        if (!url.includes('google.com/forms') && !url.includes('docs.google.com/forms')) {
+            if (!confirm('URL ini bukan tampaknya Google Form. Tetap set?')) return;
+        }
+        try {
+            const res = await fetch('/api/set-form-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+            });
+            if (res.ok) {
+                alert('URL berhasil diatur. Peserta sekarang dapat mengakses ujian.');
+                loadCurrentUrl();
+            } else {
+                alert('Gagal mengatur URL');
+            }
+        } catch(e) { alert('Error: ' + e.message); }
+    }
+
+    function initSocket() {
+        socket = io();
+        socket.emit('admin-join');
+        socket.on('active-participants', (participants) => {
+            const currentSessions = Array.from(active.keys());
+            participants.forEach(p => { if (!active.has(p.sessionId)) addParticipant(p); else { const existing = active.get(p.sessionId); existing.semester = p.semester; existing.name = p.name; } });
+            currentSessions.forEach(sid => { if (!participants.find(p => p.sessionId === sid)) removeParticipant(sid); });
+            applyLiveFilter();
+        });
+        socket.on('live-frame-update', ({ sessionId, frame }) => {
+            if (active.has(sessionId)) active.get(sessionId).img.src = frame;
+            else { fetch(`/api/sessions?semester=all`).then(res => res.json()).then(sessions => { const found = sessions.find(s => s.sessionId === sessionId); if (found) addParticipant({ sessionId, semester: found.semester, name: found.name }, frame); }); }
+        });
+    }
+
+    function addParticipant(p, frame = null) {
+        const grid = document.getElementById('liveGrid');
+        if (grid.children.length === 1 && grid.children[0].tagName === 'P') grid.innerHTML = '';
+        const card = document.createElement('div');
+        card.className = 'live-card';
+        card.id = `live-${p.sessionId}`;
+        card.setAttribute('data-semester', p.semester);
+        const img = document.createElement('img');
+        img.id = `img-${p.sessionId}`;
+        img.src = frame || 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="320" height="180"%3E%3Crect width="100%" height="100%" fill="%23333"/%3E%3Ctext x="50%" y="50%" fill="white"%3EMenunggu%3C/text%3E%3C/svg%3E';
+        card.innerHTML = `<h4>${escapeHtml(p.name)} (Semester ${p.semester})</h4>`;
+        card.appendChild(img);
+        grid.appendChild(card);
+        active.set(p.sessionId, { img, semester: p.semester, name: p.name, card });
+        applyLiveFilter();
+    }
+
+    function removeParticipant(sessionId) {
+        const data = active.get(sessionId);
+        if (data && data.card) data.card.remove();
+        active.delete(sessionId);
+        const grid = document.getElementById('liveGrid');
+        if (grid.children.length === 0) grid.innerHTML = '<p>Belum ada peserta aktif</p>';
+    }
+
+    function applyLiveFilter() {
+        const filterSem = document.getElementById('semesterFilter').value;
+        for (let [sid, data] of active.entries()) {
+            if (data.card) {
+                if (filterSem === 'all' || data.semester === filterSem) data.card.style.display = '';
+                else data.card.style.display = 'none';
+            }
+        }
+    }
+
+    function escapeHtml(str) { return str.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'})[m]); }
+
+    async function loadSessions() {
+        const semester = document.getElementById('semesterFilter').value;
+        const res = await fetch(`/api/sessions?semester=${semester}`);
+        const sessions = await res.json();
+        const tbody = document.getElementById('sessionsBody');
+        const logSelect = document.getElementById('logSelect');
+        tbody.innerHTML = '';
+        logSelect.innerHTML = '<option value="">-- Pilih sesi --</option>';
+        sessions.forEach(s => {
+            const row = tbody.insertRow();
+            row.insertCell(0).innerText = s.name;
+            row.insertCell(1).innerText = s.nim || '-';
+            row.insertCell(2).innerText = s.semester;
+            row.insertCell(3).innerText = new Date(s.startTime).toLocaleString();
+            row.insertCell(4).innerHTML = `<button onclick="viewLogs('${s.sessionId}')">Log (${s.logsCount})</button>`;
+            row.insertCell(5).innerHTML = `<button class="danger" onclick="deleteSession('${s.sessionId}')">Hapus</button>`;
+            const optLog = document.createElement('option');
+            optLog.value = s.sessionId;
+            optLog.textContent = `${s.name} (Sem ${s.semester})`;
+            logSelect.appendChild(optLog);
+        });
+        applyLiveFilter();
+    }
+
+    async function viewLogs(sessionId) {
+        const res = await fetch(`/api/session/${sessionId}/logs`);
+        const logs = await res.json();
+        currentLogs = logs;
+        const display = document.getElementById('logDisplay');
+        if (logs.length === 0) display.innerText = 'Tidak ada log kecurangan.';
+        else display.innerHTML = logs.map(l => `[${new Date(l.timestamp).toLocaleString()}] ${l.message}`).join('\n');
+    }
+
+    async function loadLogs() {
+        const sid = document.getElementById('logSelect').value;
+        if (sid) viewLogs(sid);
+        else { document.getElementById('logDisplay').innerText = 'Pilih sesi terlebih dahulu.'; currentLogs = []; }
+    }
+
+    async function deleteSession(sessionId) {
+        if (confirm('Hapus sesi?')) {
+            await fetch(`/api/session/${sessionId}`, { method: 'DELETE' });
+            loadSessions();
+            document.getElementById('logDisplay').innerText = 'Sesi dihapus.';
+            currentLogs = [];
+        }
+    }
+
+    function exportLogToCSV() {
+        if (!currentLogs.length) { alert('Tidak ada log untuk diekspor.'); return; }
+        const select = document.getElementById('logSelect');
+        const selectedText = select.options[select.selectedIndex]?.text || 'log';
+        const rows = [['Timestamp', 'Message']];
+        currentLogs.forEach(log => { rows.push([new Date(log.timestamp).toLocaleString(), log.message]); });
+        const csvContent = rows.map(row => row.map(cell => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        link.href = url;
+        link.setAttribute('download', `log_${selectedText.replace(/[^a-z0-9]/gi, '_')}.csv`);
+        document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(url);
+    }
+
+    function exportLogToPDF() {
+        if (!currentLogs.length) { alert('Tidak ada log untuk diekspor.'); return; }
+        const printWindow = window.open('', '_blank');
+        const selectedText = document.getElementById('logSelect').options[document.getElementById('logSelect').selectedIndex]?.text || 'Log Kecurangan';
+        const logHtml = currentLogs.map(l => `<tr><td>${new Date(l.timestamp).toLocaleString()}</td><td>${escapeHtml(l.message)}</td>`).join('');
+        printWindow.document.write(`<!DOCTYPE html><html><head><title>Export Log - ${selectedText}</title><style>body{font-family:Arial;margin:20px;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #999;padding:8px;text-align:left;}th{background:#f2f2f2;}</style></head><body><h1>Log Kecurangan - ${selectedText}</h1><p>Diekspor pada: ${new Date().toLocaleString()}</p><table><thead><tr><th>Waktu</th><th>Pesan</th></tr></thead><tbody>${logHtml}</tbody></table></body></html>`);
+        printWindow.document.close();
+        printWindow.print();
+    }
+
+    window.onload = () => { loadSessions(); initSocket(); loadCurrentUrl(); };
+    setInterval(loadSessions, 10000);
+</script>
+</body>
+</html>

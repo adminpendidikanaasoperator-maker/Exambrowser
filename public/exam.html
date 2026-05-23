@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ExamBrowser - Ujian Online</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        * { user-select: none; -webkit-tap-highlight-color: transparent; }
+        body { margin: 0; padding: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #1e1e2f; color: white; }
+        #controls { background: #0f0f1a; padding: 12px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; border-bottom: 1px solid #2c2c3a; }
+        button { background: #2c3e66; border: none; padding: 8px 20px; color: white; border-radius: 6px; cursor: pointer; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        #status { font-size: 14px; background: #2a2a3a; padding: 6px 12px; border-radius: 20px; }
+        .dynamic-watermark {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.7);
+            color: #ffaa44;
+            padding: 8px 15px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 14px;
+            font-weight: bold;
+            z-index: 10000;
+            pointer-events: none;
+            border-left: 4px solid #ffaa44;
+            backdrop-filter: blur(4px);
+        }
+        .transparent-watermark {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: 9998;
+            background: repeating-linear-gradient(45deg, rgba(255,255,255,0.02) 0px, rgba(255,255,255,0.02) 20px, rgba(0,0,0,0.02) 20px, rgba(0,0,0,0.02) 40px);
+        }
+        #iframeContainer { position: relative; width: 100vw; height: calc(100vh - 60px); }
+        iframe { width: 100%; height: 100%; border: none; }
+        .overlay {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            font-size: 24px;
+            text-align: center;
+            flex-direction: column;
+            backdrop-filter: blur(5px);
+        }
+        .modal {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.95);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 20000;
+        }
+        .modal-content {
+            background: #2a2a3a;
+            padding: 30px;
+            border-radius: 16px;
+            width: 350px;
+            text-align: center;
+        }
+        .modal-content input, .modal-content select {
+            width: 90%;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 8px;
+            border: none;
+            font-size: 14px;
+        }
+        .modal-content button { background: #2c3e66; margin-top: 10px; width: 100%; }
+        .waiting-message { color: #ffaa44; margin-top: 20px; }
+    </style>
+</head>
+<body>
+<div id="controls">
+    <div><strong>📝 ExamBrowser</strong> | Peserta: <span id="participantName">-</span> | NIM: <span id="participantNIM">-</span> | Semester: <span id="participantSemester">-</span></div>
+    <div><button id="startExamBtn" disabled>▶ Mulai Ujian & Rekam Layar</button><button id="finishExamBtn" disabled>✅ Selesai & Kirim</button></div>
+    <div id="status">⏳ Menghubungkan ke server...</div>
+</div>
+<div id="iframeContainer" style="position:relative;">
+    <iframe id="googleFormFrame" src="about:blank" title="Google Form"></iframe>
+    <div id="iframeOverlay" class="overlay" style="display:flex;">
+        <div>
+            <h2>🔒 Ujian Belum Dimulai</h2>
+            <p>Isi identitas Anda, lalu klik "Mulai Ujian".</p>
+            <div id="urlStatus" class="waiting-message">⏳ Menunggu pengaturan URL ujian dari admin...</div>
+        </div>
+    </div>
+</div>
+<div id="dynamicWatermark" class="dynamic-watermark"></div>
+<div class="transparent-watermark"></div>
+
+<script>
+    let sessionId = null, participantName = "", participantNIM = "", participantSemester = "1";
+    let googleFormUrl = "";
+    let mediaRecorder = null, recordingActive = false, examActive = false, examFinished = false;
+    let liveStream = null, snapshotInterval = null, socket = null, iframeUrlCheck = null, fullscreenCheckInterval = null, watermarkInterval = null;
+
+    const startBtn = document.getElementById('startExamBtn'), finishBtn = document.getElementById('finishExamBtn');
+    const statusDiv = document.getElementById('status'), participantNameSpan = document.getElementById('participantName');
+    const participantNIMSpan = document.getElementById('participantNIM'), participantSemesterSpan = document.getElementById('participantSemester');
+    const iframe = document.getElementById('googleFormFrame'), iframeOverlay = document.getElementById('iframeOverlay');
+    const dynamicWatermarkDiv = document.getElementById('dynamicWatermark');
+    const urlStatusDiv = document.getElementById('urlStatus');
+
+    async function sendLog(message, type = 'cheat') {
+        if (!sessionId) return;
+        try { await fetch(`/api/log/${sessionId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message, type }) }); } catch(e) {}
+    }
+
+    async function fetchFormUrl() {
+        try {
+            const res = await fetch('/api/get-form-url');
+            const data = await res.json();
+            if (data.url && data.url.trim() !== '') {
+                googleFormUrl = data.url;
+                urlStatusDiv.innerHTML = '✅ URL ujian sudah siap. Silakan mulai ujian.';
+                urlStatusDiv.style.color = '#aaffaa';
+                return true;
+            } else {
+                urlStatusDiv.innerHTML = '⚠️ Admin belum mengatur URL Google Form. Silakan tunggu atau hubungi pengawas.';
+                urlStatusDiv.style.color = '#ffaa44';
+                return false;
+            }
+        } catch(e) {
+            console.error(e);
+            urlStatusDiv.innerHTML = '❌ Gagal terhubung ke server. Periksa koneksi.';
+            return false;
+        }
+    }
+
+    async function forceFullscreen() {
+        if (!document.fullscreenElement) {
+            try { await document.documentElement.requestFullscreen(); sendLog('🔒 Fullscreen diaktifkan'); } catch(err) { sendLog(`⚠️ Gagal fullscreen: ${err.message}`); }
+        }
+    }
+    function startFullscreenMonitor() {
+        if (fullscreenCheckInterval) clearInterval(fullscreenCheckInterval);
+        fullscreenCheckInterval = setInterval(() => {
+            if (examActive && !document.fullscreenElement) { sendLog('🚨 Keluar fullscreen! Memaksa masuk.'); forceFullscreen(); }
+        }, 1000);
+    }
+    function blockEscape() {
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' || e.key === 'Esc') { e.preventDefault(); sendLog('🔒 Mencoba ESC (diblokir)'); forceFullscreen(); return false; }
+        });
+    }
+
+    function updateDynamicWatermark() {
+        if (!participantName || !sessionId) return;
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        dynamicWatermarkDiv.innerHTML = `📋 ${participantName} (${participantNIM}) | Sem ${participantSemester} | ${timeStr} | ID: ${sessionId.substring(0,6)}`;
+    }
+    function startWatermarkUpdater() {
+        if (watermarkInterval) clearInterval(watermarkInterval);
+        updateDynamicWatermark();
+        watermarkInterval = setInterval(updateDynamicWatermark, 1000);
+    }
+
+    function blockCopyPaste() {
+        document.addEventListener('copy', (e) => { e.preventDefault(); sendLog('📋 Mencoba copy'); return false; });
+        document.addEventListener('cut', (e) => { e.preventDefault(); sendLog('✂️ Mencoba cut'); return false; });
+        document.addEventListener('paste', (e) => { e.preventDefault(); sendLog('📌 Mencoba paste'); return false; });
+        document.addEventListener('selectstart', (e) => { e.preventDefault(); return false; });
+        document.addEventListener('dragstart', (e) => { e.preventDefault(); return false; });
+    }
+
+    function blockScreenshot() {
+        window.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            if (key === 'printscreen') {
+                e.preventDefault();
+                sendLog('📸 Mencoba screenshot (PrintScreen)');
+                statusDiv.innerText = '❌ Screenshot dilarang!';
+                setTimeout(() => statusDiv.innerText = examActive ? 'Ujian berlangsung' : 'Sesi siap', 2000);
+            }
+            if ((e.ctrlKey && e.shiftKey && (key === 's' || key === '4')) || (e.metaKey && e.shiftKey && (key === '3' || key === '4' || key === '5')) || (e.ctrlKey && key === 'p')) {
+                e.preventDefault();
+                sendLog(`📸 Mencoba screenshot via shortcut (${e.key})`);
+                statusDiv.innerText = '🚫 Screenshot via shortcut dilarang!';
+                setTimeout(() => statusDiv.innerText = examActive ? 'Ujian berlangsung' : 'Sesi siap', 2000);
+            }
+        });
+        window.addEventListener('resize', () => { if (examActive) sendLog('⚠️ Resize terdeteksi (potensi screenshot)'); });
+    }
+
+    function blockCameraAndScreenCapture() {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            const original = navigator.mediaDevices.getUserMedia;
+            navigator.mediaDevices.getUserMedia = function(constraints) {
+                if (constraints.video) { sendLog('🎥 Mencoba akses kamera (diblokir)'); return Promise.reject(new Error('Akses kamera diblokir')); }
+                return original.call(this, constraints);
+            };
+        }
+    }
+
+    function detectDevTools() { setInterval(() => { const before = Date.now(); debugger; if (Date.now() - before > 100 && examActive) sendLog('🛠️ DevTools terdeteksi!'); }, 3000); }
+    function detectFocusLoss() { window.addEventListener('blur', () => { if (examActive) sendLog('🔄 Kehilangan fokus (mungkin buka aplikasi lain)'); }); document.addEventListener('visibilitychange', () => { if (document.hidden && examActive) sendLog('👁️ Tab disembunyikan (pindah tab)'); }); }
+    function blockRightClick() { document.addEventListener('contextmenu', (e) => { e.preventDefault(); sendLog('🖱️ Klik kanan'); return false; }); }
+    function detectSuspiciousElements() { new MutationObserver((mutations) => { mutations.forEach((m) => { if (m.type === 'childList') { m.addedNodes.forEach((node) => { if (node.nodeType === 1) { let cls = node.className || '', id = node.id || ''; if (cls.includes('screenshot') || id.includes('screenshot') || cls.includes('snip') || cls.includes('capture')) sendLog('⚠️ Elemen mencurigakan (tool screenshot) muncul'); } }); } }); }).observe(document.body, { childList: true, subtree: true }); }
+
+    function showIdentityDialog() {
+        return new Promise((resolve) => {
+            const modal = document.createElement('div');
+            modal.className = 'modal';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <h3>Input Identitas Peserta</h3>
+                    <input id="modalName" placeholder="Nama Lengkap" autocomplete="off">
+                    <input id="modalNIM" placeholder="NIM" autocomplete="off">
+                    <select id="modalSemester">
+                        <option value="1">Semester 1</option><option value="2">Semester 2</option>
+                        <option value="3">Semester 3</option><option value="4">Semester 4</option>
+                        <option value="5">Semester 5</option><option value="6">Semester 6</option>
+                    </select>
+                    <button id="modalSubmit">Lanjutkan</button>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            const nameInput = modal.querySelector('#modalName');
+            const nimInput = modal.querySelector('#modalNIM');
+            const semesterSelect = modal.querySelector('#modalSemester');
+            modal.querySelector('#modalSubmit').onclick = () => {
+                const name = nameInput.value.trim();
+                const nim = nimInput.value.trim();
+                const semester = semesterSelect.value;
+                if (!name || !nim) { alert('Isi nama dan NIM!'); return; }
+                modal.remove();
+                resolve({ name, nim, semester });
+            };
+            nameInput.focus();
+        });
+    }
+
+    async function registerWithRetry(name, nim, semester, retries = 3) {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const res = await fetch('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ participantName: name + " (" + nim + ")", nim: nim, semester: semester }) });
+                if (res.ok) return (await res.json()).sessionId;
+            } catch(e) { if (i === retries-1) throw e; await new Promise(r => setTimeout(r, 1000)); }
+        }
+        throw new Error('Gagal registrasi');
+    }
+
+    async function initSession() {
+        const urlReady = await fetchFormUrl();
+        const identity = await showIdentityDialog();
+        participantName = identity.name;
+        participantNIM = identity.nim;
+        participantSemester = identity.semester;
+        participantNameSpan.innerText = participantName;
+        participantNIMSpan.innerText = participantNIM;
+        participantSemesterSpan.innerText = participantSemester;
+        statusDiv.innerText = '🔄 Mendaftar ke server...';
+        try {
+            sessionId = await registerWithRetry(participantName, participantNIM, participantSemester);
+            startWatermarkUpdater();
+            sendLog(`Sesi dibuat untuk ${participantName} (${participantNIM}, Sem ${participantSemester})`);
+            statusDiv.innerText = '✅ Sesi siap. Menunggu URL ujian dari admin...';
+            const checkUrlInterval = setInterval(async () => {
+                const ready = await fetchFormUrl();
+                if (ready && googleFormUrl) {
+                    clearInterval(checkUrlInterval);
+                    statusDiv.innerText = '✅ Sesi siap. Klik Mulai Ujian.';
+                    startBtn.disabled = false;
+                    urlStatusDiv.innerHTML = '✅ URL ujian sudah siap. Silakan mulai ujian.';
+                }
+            }, 3000);
+        } catch(e) {
+            statusDiv.innerText = '❌ Gagal koneksi server. Refresh halaman.';
+            console.error(e);
+        }
+    }
+
+    function initSocket() { socket = io(); socket.on('connect', () => { if (sessionId) socket.emit('participant-join', sessionId); }); }
+
+    async function startScreenRecording(stream) {
+        mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+        mediaRecorder.ondataavailable = async (e) => { if (e.data.size) { let fd = new FormData(); fd.append('chunk', e.data); await fetch(`/api/upload-chunk/${sessionId}`, { method: 'POST', body: fd }).catch(()=>{}); } };
+        mediaRecorder.onstop = () => { recordingActive = false; statusDiv.innerText = '✅ Rekaman selesai'; };
+        mediaRecorder.start(5000);
+        recordingActive = true;
+        statusDiv.innerText = '🎥 Rekaman aktif';
+        sendLog('Mulai rekam layar');
+    }
+
+    function startLiveCapture(stream) {
+        liveStream = stream;
+        const video = document.createElement('video');
+        video.srcObject = stream; video.play();
+        const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d');
+        snapshotInterval = setInterval(() => {
+            if (!examActive) return;
+            if (video.videoWidth && video.videoHeight) {
+                canvas.width = 320; canvas.height = (video.videoHeight / video.videoWidth) * 320;
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                socket.emit('live-frame', { sessionId, frame: canvas.toDataURL('image/jpeg', 0.5) });
+            }
+        }, 1000);
+    }
+
+    async function startExam() {
+        if (examActive) return;
+        if (!googleFormUrl) {
+            alert('URL ujian belum diatur oleh admin. Silakan tunggu.');
+            return;
+        }
+        examActive = true; examFinished = false;
+        iframe.src = googleFormUrl;
+        iframeOverlay.style.display = 'none';
+        await forceFullscreen();
+        startFullscreenMonitor();
+        let stream;
+        try { stream = await navigator.mediaDevices.getDisplayMedia({ video: true }); } catch(err) { alert('Izin rekam layar diperlukan!'); examActive = false; iframeOverlay.style.display = 'flex'; return; }
+        startLiveCapture(stream);
+        await startScreenRecording(stream);
+        startBtn.disabled = true; finishBtn.disabled = false;
+        statusDiv.innerText = '📝 Ujian berlangsung + rekaman + live';
+        sendLog('Ujian dimulai');
+        iframeUrlCheck = setInterval(() => { if (iframe.src.includes('formResponse') || iframe.src.includes('thankyou')) { if (examActive && !examFinished) sendLog('⚠️ Form dikirim sebelum Selesai & Kirim'); } }, 500);
+    }
+
+    async function finishExam() {
+        if (!examActive) return;
+        examActive = false; examFinished = true;
+        if (snapshotInterval) clearInterval(snapshotInterval);
+        if (mediaRecorder && recordingActive) mediaRecorder.stop();
+        if (liveStream) liveStream.getTracks().forEach(t => t.stop());
+        if (iframeUrlCheck) clearInterval(iframeUrlCheck);
+        if (fullscreenCheckInterval) clearInterval(fullscreenCheckInterval);
+        if (watermarkInterval) clearInterval(watermarkInterval);
+        iframeOverlay.style.display = 'flex';
+        iframe.src = 'about:blank';
+        if (socket) socket.disconnect();
+        await fetch(`/api/end-recording/${sessionId}`, { method: 'POST' });
+        statusDiv.innerText = '✅ Ujian selesai';
+        sendLog('Ujian selesai');
+        finishBtn.disabled = true;
+        alert('Ujian selesai.');
+        if (document.fullscreenElement) document.exitFullscreen();
+    }
+
+    async function init() {
+        await initSession();
+        initSocket();
+        blockCopyPaste();
+        blockScreenshot();
+        blockCameraAndScreenCapture();
+        detectDevTools();
+        detectFocusLoss();
+        blockRightClick();
+        detectSuspiciousElements();
+        blockEscape();
+        startBtn.onclick = startExam;
+        finishBtn.onclick = finishExam;
+    }
+    init();
+</script>
+</body>
+</html>
