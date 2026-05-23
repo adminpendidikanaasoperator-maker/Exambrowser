@@ -1,0 +1,27 @@
+{
+  "name": "exambrowser",
+  "version": "1.0.0",
+  "description": "ExamBrowser with CLI and Admin-controlled Google Form URL",
+  "main": "server.js",
+  "bin": {
+    "exambrowser": "cli.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "set-url": "node cli.js --set",
+    "get-url": "node cli.js --get",
+    "install": "npm install"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.5",
+    "cors": "^2.8.6",
+    "express": "^4.22.2",
+    "multer": "^1.4.5-lts.1",
+    "socket.io": "^4.8.3",
+    "uuid": "^9.0.1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}
