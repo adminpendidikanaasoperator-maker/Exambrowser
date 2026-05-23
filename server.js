@@ -13,17 +13,24 @@ app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(express.static('public'));
 
-// Konfigurasi file penyimpanan URL Google Form
+// Konfigurasi file penyimpanan URL per semester
 const CONFIG_FILE = path.join(__dirname, 'config.json');
-let currentGoogleFormUrl = '';
+let semesterUrls = {
+    1: '',
+    2: '',
+    3: '',
+    4: '',
+    5: '',
+    6: ''
+};
 if (fs.existsSync(CONFIG_FILE)) {
     try {
         const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-        if (config.googleFormUrl) currentGoogleFormUrl = config.googleFormUrl;
+        if (config.semesterUrls) semesterUrls = config.semesterUrls;
     } catch(e) {}
 }
 function saveConfig() {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify({ googleFormUrl: currentGoogleFormUrl }, null, 2));
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify({ semesterUrls }, null, 2));
 }
 
 // Folder rekaman
@@ -53,7 +60,28 @@ function getClientIp(req) {
            'IP tidak terdeteksi';
 }
 
-// API
+// API untuk mendapatkan URL form berdasarkan semester
+app.get('/api/get-form-url/:semester', (req, res) => {
+    const semester = req.params.semester;
+    const url = semesterUrls[semester] || '';
+    res.json({ url });
+});
+
+// API untuk admin mengatur URL per semester
+app.post('/api/set-form-url', (req, res) => {
+    const { semester, url } = req.body;
+    if (!semester || !url) return res.status(400).json({ error: 'Semester and URL required' });
+    semesterUrls[semester] = url;
+    saveConfig();
+    res.json({ success: true, semester, url });
+});
+
+// API untuk mendapat semua URL (untuk admin)
+app.get('/api/all-form-urls', (req, res) => {
+    res.json({ urls: semesterUrls });
+});
+
+// Register peserta
 app.post('/api/register', (req, res) => {
     const sessionId = uuidv4();
     const { participantName = 'Anonymous', nim = '', semester = '1' } = req.body;
@@ -98,18 +126,6 @@ app.post('/api/upload-chunk/:sessionId', upload.single('chunk'), (req, res) => {
 
 app.post('/api/end-recording/:sessionId', (req, res) => {
     res.json({ success: true });
-});
-
-app.get('/api/get-form-url', (req, res) => {
-    res.json({ url: currentGoogleFormUrl });
-});
-
-app.post('/api/set-form-url', (req, res) => {
-    const { url } = req.body;
-    if (!url) return res.status(400).json({ error: 'URL required' });
-    currentGoogleFormUrl = url;
-    saveConfig();
-    res.json({ success: true, url: currentGoogleFormUrl });
 });
 
 app.get('/api/sessions', (req, res) => {
