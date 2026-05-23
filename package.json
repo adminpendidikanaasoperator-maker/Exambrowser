@@ -9,8 +9,7 @@
   "scripts": {
     "start": "node server.js",
     "set-url": "node cli.js --set",
-    "get-url": "node cli.js --get",
-    "install": "npm install"
+    "get-url": "node cli.js --get"
   },
   "dependencies": {
     "body-parser": "^1.20.5",
