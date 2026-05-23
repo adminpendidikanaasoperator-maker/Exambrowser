@@ -30,10 +30,8 @@ function saveConfig() {
 const RECORDINGS_DIR = path.join(__dirname, 'recordings');
 if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR);
 
-// Penyimpanan sesi di memori
 const sessions = new Map();
 
-// Multer upload video
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const sessionId = req.params.sessionId;
@@ -47,7 +45,6 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage, limits: { fileSize: 100 * 1024 * 1024 } });
 
-// Helper ambil IP client
 function getClientIp(req) {
     return req.headers['cf-connecting-ip'] ||
            req.headers['x-forwarded-for']?.split(',').shift() ||
@@ -56,7 +53,7 @@ function getClientIp(req) {
            'IP tidak terdeteksi';
 }
 
-// ========== API Peserta ==========
+// API
 app.post('/api/register', (req, res) => {
     const sessionId = uuidv4();
     const { participantName = 'Anonymous', nim = '', semester = '1' } = req.body;
@@ -103,7 +100,6 @@ app.post('/api/end-recording/:sessionId', (req, res) => {
     res.json({ success: true });
 });
 
-// ========== API Admin ==========
 app.get('/api/get-form-url', (req, res) => {
     res.json({ url: currentGoogleFormUrl });
 });
@@ -154,7 +150,6 @@ app.delete('/api/session/:sessionId', (req, res) => {
     }
 });
 
-// Rute untuk akses tanpa .html
 app.get('/exam', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'exam.html'));
 });
