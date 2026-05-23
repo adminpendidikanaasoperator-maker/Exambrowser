@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin - ExamBrowser Monitor</title>
-    <script src="/socket.io/socket.io.js"></script>
+    <title>Admin - ExamBrowser Monitor (Pusher)</title>
+    <script src="https://js.pusher.com/8.4.0/pusher.min.js"></script>
     <style>
         body { font-family: 'Segoe UI', sans-serif; background: #1e1e2f; color: #eee; margin: 0; padding: 20px; }
         h1 { color: #ffaa44; }
@@ -29,7 +29,7 @@
     </style>
 </head>
 <body>
-<h1>📊 Admin Panel - ExamBrowser</h1>
+<h1>📊 Admin Panel - ExamBrowser (Pusher)</h1>
 
 <div class="card">
     <h2>🔗 Pengaturan URL Google Form Ujian</h2>
@@ -53,7 +53,7 @@
         <button onclick="loadSessions()">Terapkan Filter</button>
         <button onclick="loadSessions()">🔄 Refresh</button>
     </div>
-    <table id="sessionsTable"><thead><tr><th>Nama</th><th>NIM</th><th>Semester</th><th>Mulai</th><th>Log</th><th>Aksi</th></tr></thead><tbody id="sessionsBody"></tbody></table>
+    <table id="sessionsTable"><thead><tr><th>Nama</th><th>NIM</th><th>Semester</th><th>IP Address</th><th>Mulai</th><th>Log</th><th>Aksi</th></tr></thead><tbody id="sessionsBody"></tbody></table>
 </div>
 
 <div class="flex">
@@ -69,62 +69,47 @@
 </div>
 
 <div class="card">
-    <h2>🖥️ Live Streaming (Real-time)</h2>
+    <h2>🖥️ Live Streaming (Real-time via Pusher)</h2>
     <div id="liveGrid" class="live-grid"><p>Belum ada peserta aktif</p></div>
 </div>
 
 <script>
-    let socket = null;
-    let active = new Map();
+    // ==================== KONFIGURASI PUSHER ====================
+    const PUSHER_APP_KEY = '0b5dee236ba494a907ca';
+    const PUSHER_CLUSTER = 'ap1';
+    const CHANNEL_NAME = 'exam-live';
+    const CLIENT_EVENT = 'client-frame';
+
+    let active = new Map(); // sessionId -> { img, semester, name, card }
     let currentLogs = [];
 
-    async function loadCurrentUrl() {
-        try {
-            const res = await fetch('/api/get-form-url');
-            const data = await res.json();
-            const display = document.getElementById('currentUrlDisplay');
-            if (data.url && data.url.trim() !== '') {
-                display.innerHTML = `URL saat ini: <strong>${escapeHtml(data.url)}</strong>`;
-            } else {
-                display.innerHTML = 'URL saat ini: (belum diatur)';
-            }
-            document.getElementById('formUrlInput').value = data.url || '';
-        } catch(e) { console.error(e); }
-    }
-
-    async function setFormUrl() {
-        const url = document.getElementById('formUrlInput').value.trim();
-        if (!url) { alert('Masukkan URL Google Form'); return; }
-        if (!url.includes('google.com/forms') && !url.includes('docs.google.com/forms')) {
-            if (!confirm('URL ini bukan tampaknya Google Form. Tetap set?')) return;
-        }
-        try {
-            const res = await fetch('/api/set-form-url', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url })
-            });
-            if (res.ok) {
-                alert('URL berhasil diatur. Peserta sekarang dapat mengakses ujian.');
-                loadCurrentUrl();
-            } else {
-                alert('Gagal mengatur URL');
-            }
-        } catch(e) { alert('Error: ' + e.message); }
-    }
-
-    function initSocket() {
-        socket = io();
-        socket.emit('admin-join');
-        socket.on('active-participants', (participants) => {
-            const currentSessions = Array.from(active.keys());
-            participants.forEach(p => { if (!active.has(p.sessionId)) addParticipant(p); else { const existing = active.get(p.sessionId); existing.semester = p.semester; existing.name = p.name; } });
-            currentSessions.forEach(sid => { if (!participants.find(p => p.sessionId === sid)) removeParticipant(sid); });
-            applyLiveFilter();
+    // ==================== PUSHER SUBSCRIBE ====================
+    function initPusher() {
+        const pusher = new Pusher(PUSHER_APP_KEY, {
+            cluster: PUSHER_CLUSTER,
+            forceTLS: true
         });
-        socket.on('live-frame-update', ({ sessionId, frame }) => {
-            if (active.has(sessionId)) active.get(sessionId).img.src = frame;
-            else { fetch(`/api/sessions?semester=all`).then(res => res.json()).then(sessions => { const found = sessions.find(s => s.sessionId === sessionId); if (found) addParticipant({ sessionId, semester: found.semester, name: found.name }, frame); }); }
+        const channel = pusher.subscribe(CHANNEL_NAME);
+        channel.bind(CLIENT_EVENT, (data) => {
+            const { sessionId, frame } = data;
+            if (active.has(sessionId)) {
+                active.get(sessionId).img.src = frame;
+            } else {
+                // Tambahkan peserta baru ke grid (nama sementara)
+                addParticipant({ sessionId, semester: '?', name: sessionId.slice(0,8) }, frame);
+                // Coba ambil data dari API untuk update nama & semester
+                fetch(`/api/sessions?semester=all`).then(res => res.json()).then(sessions => {
+                    const found = sessions.find(s => s.sessionId === sessionId);
+                    if (found && active.has(sessionId)) {
+                        const card = active.get(sessionId).card;
+                        if (card) {
+                            card.querySelector('h4').innerHTML = `${escapeHtml(found.name)} (Semester ${found.semester})`;
+                            active.get(sessionId).semester = found.semester;
+                            active.get(sessionId).name = found.name;
+                        }
+                    }
+                });
+            }
         });
     }
 
@@ -165,6 +150,42 @@
 
     function escapeHtml(str) { return str.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'})[m]); }
 
+    // ==================== API CALLS ====================
+    async function loadCurrentUrl() {
+        try {
+            const res = await fetch('/api/get-form-url');
+            const data = await res.json();
+            const display = document.getElementById('currentUrlDisplay');
+            if (data.url && data.url.trim() !== '') {
+                display.innerHTML = `URL saat ini: <strong>${escapeHtml(data.url)}</strong>`;
+            } else {
+                display.innerHTML = 'URL saat ini: (belum diatur)';
+            }
+            document.getElementById('formUrlInput').value = data.url || '';
+        } catch(e) { console.error(e); }
+    }
+
+    async function setFormUrl() {
+        const url = document.getElementById('formUrlInput').value.trim();
+        if (!url) { alert('Masukkan URL Google Form'); return; }
+        if (!url.includes('google.com/forms') && !url.includes('docs.google.com/forms')) {
+            if (!confirm('URL ini bukan tampaknya Google Form. Tetap set?')) return;
+        }
+        try {
+            const res = await fetch('/api/set-form-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+            });
+            if (res.ok) {
+                alert('URL berhasil diatur. Peserta sekarang dapat mengakses ujian.');
+                loadCurrentUrl();
+            } else {
+                alert('Gagal mengatur URL');
+            }
+        } catch(e) { alert('Error: ' + e.message); }
+    }
+
     async function loadSessions() {
         const semester = document.getElementById('semesterFilter').value;
         const res = await fetch(`/api/sessions?semester=${semester}`);
@@ -178,9 +199,10 @@
             row.insertCell(0).innerText = s.name;
             row.insertCell(1).innerText = s.nim || '-';
             row.insertCell(2).innerText = s.semester;
-            row.insertCell(3).innerText = new Date(s.startTime).toLocaleString();
-            row.insertCell(4).innerHTML = `<button onclick="viewLogs('${s.sessionId}')">Log (${s.logsCount})</button>`;
-            row.insertCell(5).innerHTML = `<button class="danger" onclick="deleteSession('${s.sessionId}')">Hapus</button>`;
+            row.insertCell(3).innerText = s.clientIp || '-';
+            row.insertCell(4).innerText = new Date(s.startTime).toLocaleString();
+            row.insertCell(5).innerHTML = `<button onclick="viewLogs('${s.sessionId}')">Log (${s.logsCount})</button>`;
+            row.insertCell(6).innerHTML = `<button class="danger" onclick="deleteSession('${s.sessionId}')">Hapus</button>`;
             const optLog = document.createElement('option');
             optLog.value = s.sessionId;
             optLog.textContent = `${s.name} (Sem ${s.semester})`;
@@ -210,6 +232,7 @@
             loadSessions();
             document.getElementById('logDisplay').innerText = 'Sesi dihapus.';
             currentLogs = [];
+            if (active.has(sessionId)) removeParticipant(sessionId);
         }
     }
 
@@ -233,12 +256,12 @@
         const printWindow = window.open('', '_blank');
         const selectedText = document.getElementById('logSelect').options[document.getElementById('logSelect').selectedIndex]?.text || 'Log Kecurangan';
         const logHtml = currentLogs.map(l => `<tr><td>${new Date(l.timestamp).toLocaleString()}</td><td>${escapeHtml(l.message)}</td>`).join('');
-        printWindow.document.write(`<!DOCTYPE html><html><head><title>Export Log - ${selectedText}</title><style>body{font-family:Arial;margin:20px;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #999;padding:8px;text-align:left;}th{background:#f2f2f2;}</style></head><body><h1>Log Kecurangan - ${selectedText}</h1><p>Diekspor pada: ${new Date().toLocaleString()}</p><table><thead><tr><th>Waktu</th><th>Pesan</th></tr></thead><tbody>${logHtml}</tbody></table></body></html>`);
+        printWindow.document.write(`<!DOCTYPE html><html><head><title>Export Log - ${selectedText}</title><style>body{font-family:Arial;margin:20px;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #999;padding:8px;text-align:left;}th{background:#f2f2f2;}</style></head><body><h1>Log Kecurangan - ${selectedText}</h1><p>Diekspor pada: ${new Date().toLocaleString()}</p><tr><thead><tr><th>Waktu</th><th>Pesan</th></tr></thead><tbody>${logHtml}</tbody></table></body></html>`);
         printWindow.document.close();
         printWindow.print();
     }
 
-    window.onload = () => { loadSessions(); initSocket(); loadCurrentUrl(); };
+    window.onload = () => { loadSessions(); loadCurrentUrl(); initPusher(); };
     setInterval(loadSessions, 10000);
 </script>
 </body>
